@@ -2,194 +2,272 @@
 #include <WiFiUdp.h>
 #include <OSCMessage.h>
 
+#define WIFI_SSID "Mine"
+#define WIFI_PASS "12345678"
+
+#define UDP_LOCAL_PORT 8888
+
+#define UDP_REMOTE_IP 172,20,10,3
+#define UDP_REMOTE_PORT 9999
+
 #define PWM_PIN 13
-#define GROUND_PIN 12
 #define PWM_CHANNEL 0
 #define PWM_FREQUENCY 1000
 #define PWM_RESOLUTION 8
 
 #define WATER_LEVEL_PIN 33
 
-#define LED_RX_PIN 15
-#define LED_TX_PIN 2
+#define MOTOR_SPEED_OSC_TOPIC "/1/faderA"
+#define WATER_LEVEL_OSC_TOPIC "/water_level"
 
-#define NUM_OCTAVES 6
+#define WATER_LEVEL_AVG_TIGHT 5
+#define WATER_LEVEL_AVG_LOOSE 10
 
-#define ROLLING_AVERAGE_NUM 50
+#define NUMBER_SKIPS_AT_START 5
 
-char ssid[] = "Mine";  // your network SSID (name)
-char pass[] = "12345678";       // your network password
+WiFiUDP Udp;
 
-WiFiUDP Udp;                                // A UDP instance to let us send and receive packets over UDP
-const IPAddress outIp(172,20,10,3);       // remote IP of your computer
-const unsigned int outPort = 9999;          // remote port to receive OSC
-const unsigned int localPort = 8888;        // local port to listen for OSC packets (actually not used for sending)
+// Function declarations
+void connectToWiFi(const char* ssid, const char* pass);
+void beginLocalUdp(unsigned int localPort);
 
-int max_water_level = 0;
-int min_water_level = 1E5;
+void startPWM(int pin, int channel, int frequency, int resolution);
 
-int rolling_average = 0;
+void readOSC();
+void sendOSC(const char* topic, float value);
 
-int last_water_level = 0;
-int last_change = 0;
+void recieveMotorSpeedOSC(OSCMessage &msg);
 
-String notes[NUM_OCTAVES] = {"03C", "03D", "03E", "03G", "04A", "04C"};
+void parseWaterLevel(int waterLevel, bool &is_extrema, float &waterLevelNorm);
+int applyRollingAverage(const int new_value, const int current_average, const int rollingAverageSize);
 
-void setup() {
-  Serial.begin(9600);
-
-  // Connect to WiFi network
-  Serial.println("\n\nConnecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, pass);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  // Print WiFi info
-  Serial.println("\nWiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-
-  // Print UDP info
-  Serial.println("Starting UDP");
-  Udp.begin(localPort);
-  Serial.print("Local port: ");
-  Serial.println(localPort);
-
-  // Setup PWM
-  ledcSetup(PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
-  ledcAttachPin(PWM_PIN, PWM_CHANNEL);
-  ledcWrite(PWM_CHANNEL, 0);
-
-  // Set ground pin to LOW (0V)
-  pinMode(GROUND_PIN, OUTPUT);
-  digitalWrite(GROUND_PIN, LOW);
-
-  // Set up RX/TX LEDs
-  pinMode(LED_RX_PIN, OUTPUT);
-  pinMode(LED_TX_PIN, OUTPUT);
-  digitalWrite(LED_TX_PIN, LOW);
-  digitalWrite(LED_RX_PIN, LOW);
-
-  for (int i = 0; i < 50; i++)
-  {
-    int val = analogRead(WATER_LEVEL_PIN);
-    delay(100);
-  }
-
-  Serial.println("Setup completed.");
-}
-
-void recieveMotorSpeed(OSCMessage &msg) {
-  // Serial.print("Received message on /1/faderA: ");
-
-  digitalWrite(LED_RX_PIN, HIGH);
-
-  // Assuming the message contains a float
-  float value = msg.getFloat(0);
-
-  // Convert to PWM value (0-256)
-  int pwmVal = value * 256;
-
-  // Print to serial
-  // Serial.print(value);
-  // Serial.print(" -> ");
-  // Serial.println(pwmVal);
-
-  // Write PWM to channel
-  ledcWrite(PWM_CHANNEL, pwmVal);
-
-  digitalWrite(LED_RX_PIN, LOW);
-}
-
-void sendWaterLevel()
+// Setup the ESP32
+void setup()
 {
-  digitalWrite(LED_TX_PIN, HIGH);
-  // Read water level
-  unsigned int water_level = analogRead(WATER_LEVEL_PIN);
+    // Start serial @ 9600 baud
+    Serial.begin(9600);
 
-  if (rolling_average != 0)
-  {
-    rolling_average = (rolling_average * (ROLLING_AVERAGE_NUM - 1) + water_level) / ROLLING_AVERAGE_NUM;
-  }
-  else 
-  {
-    rolling_average = water_level;
-  }
+    // Connect to WiFi
+    connectToWiFi(WIFI_SSID, WIFI_PASS);
 
-  if (rolling_average > max_water_level)
-  {
-    max_water_level = rolling_average;
-    //Serial.print("Max water level: ");
-    //Serial.println(max_water_level);
-  }
+    // Start UDP connection
+    beginLocalUdp(UDP_LOCAL_PORT);
 
-  if (rolling_average < min_water_level)
-  {
-    min_water_level = rolling_average;
-    //Serial.print("Min water level: ");
-    //Serial.println(min_water_level);
-  }
+    // Start PWM
+    startPWM(PWM_PIN, PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
 
-  // Convert to octave
-  float water_level_norm = float(rolling_average - min_water_level) / float(max_water_level - min_water_level);
-  int index = water_level_norm * NUM_OCTAVES;
-  String note = notes[index % NUM_OCTAVES];
-
-  int new_change = rolling_average - last_water_level;
-
-  if (signbit(new_change) != signbit(last_change))
-  {
-    // Send message on UDP
-    OSCMessage msg_out("/water_level");
-    msg_out.add(water_level_norm);
-    Udp.beginPacket(outIp, outPort);
-    msg_out.send(Udp);
-    Udp.endPacket();
-    msg_out.empty();
-    digitalWrite(LED_TX_PIN, LOW);
-
-    Serial.println(note);
-  }
-
-  // Print to serial
-  //Serial.print(min_water_level);
-  //Serial.print(" ");
-  //Serial.print(max_water_level);
-  //Serial.print(" ");
-  //Serial.println(rolling_average);
-
-  //Serial.print(" | Norm: ");
-  //Serial.print(0);
-  //Serial.print(" ");
-  //Serial.print(1.0);
-  //Serial.print(" ");
-  //Serial.println(water_level_norm);
-
-  last_water_level = rolling_average;
-  last_change = new_change;
+    Serial.println("Setup complete");
 }
 
-void loop() {
-  OSCMessage msg_in;
-  int size = Udp.parsePacket();
+// Run the ESP32
+void loop()
+{
+    static int num_skips = 0;
 
-  if (size > 0) {
-    while (size--) {
-      msg_in.fill(Udp.read());
-    }
-    if (!msg_in.hasError()) {
-      msg_in.dispatch("/1/faderA", recieveMotorSpeed);
-    } else {
-      OSCErrorCode error = msg_in.getError();
-      Serial.print("error: ");
-      Serial.println(error);
-    }
-  }
+    // Read incoming OSC messages
+    readOSC();
 
-  sendWaterLevel();
-  delay(25);
+    // Read current water level
+    int waterLevel = analogRead(WATER_LEVEL_PIN);
+
+    // Parse water level
+    bool is_extrema;
+    float waterLevelNorm;
+    parseWaterLevel(waterLevel, is_extrema, waterLevelNorm);
+
+    // Send water level OSC message
+    if (is_extrema)
+    {
+        // Skip first few readings
+        if (num_skips >= NUMBER_SKIPS_AT_START)
+        {
+            sendOSC(WATER_LEVEL_OSC_TOPIC, waterLevelNorm);
+
+            Serial.print("Water level %: ");
+            Serial.println(waterLevelNorm * 100);
+        }
+        else
+        {
+            num_skips++;
+        }
+    }
+
+    // Delay 25ms
+    delay(25);
+}
+
+// Connect to a WiFi network
+void connectToWiFi(const char* ssid, const char* pass) 
+{
+    Serial.println("\n\nConnecting to ");
+    Serial.println(ssid);
+    WiFi.begin(ssid, pass);
+
+    while (WiFi.status() != WL_CONNECTED) 
+    {
+        delay(500);
+        Serial.print(".");
+    }
+
+    Serial.println("\nWiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+}
+
+// Start a UDP connection
+void beginLocalUdp(unsigned int localPort) 
+{
+    Serial.println("Starting UDP");
+    Udp.begin(localPort);
+    Serial.print("Local port: ");
+    Serial.println(localPort);
+}
+
+// Start a PWM connection
+void startPWM(int pin, int channel, int frequency, int resolution) 
+{
+    ledcSetup(channel, frequency, resolution);
+    ledcAttachPin(pin, channel);
+    ledcWrite(channel, 0);
+}
+
+// Read incoming OSC messages
+void readOSC()
+{
+    OSCMessage msg;
+    int size = Udp.parsePacket();
+    if (size > 0) 
+    {
+        while (size--) 
+        {
+            msg.fill(Udp.read());
+        }
+        if (!msg.hasError()) 
+        {
+            msg.dispatch(MOTOR_SPEED_OSC_TOPIC, recieveMotorSpeedOSC);
+        } 
+        else 
+        {
+            Serial.print("OSC Error: ");
+            Serial.println(msg.getError());
+        }
+    }
+}
+
+void sendOSC(const char* topic, float value)
+{
+    OSCMessage msg(topic);
+    msg.add(value);
+
+    Udp.beginPacket(IPAddress(UDP_REMOTE_IP), UDP_REMOTE_PORT);
+    msg.send(Udp);
+    Udp.endPacket();
+}
+
+// Parse motor speed OSC message
+void recieveMotorSpeedOSC(OSCMessage &msg) {
+    // Assuming the message contains a float
+    float value = msg.getFloat(0);
+
+    // Convert to PWM value (0-255)
+    int pwmVal = int(value * 256);
+
+    // Write PWM to channel
+    ledcWrite(PWM_CHANNEL, pwmVal);
+
+    //Serial.print("Motor speed: ");
+    //Serial.println(pwmVal);
+}
+
+// Parse water level
+void parseWaterLevel(int waterLevel, bool &is_extrema, float &waterLevelNorm)
+{
+    // Static variables to track rolling averages
+    static int waterLevelAvgTight = 0;
+    static int waterLevelAvgLoose = 0;
+    static bool is_rising_last = false;
+
+    // Static variables to track extrema
+    static int maxWaterLevel = 0;
+    static int minWaterLevel = 1E6;
+
+    // Static variables to track extrema within a period
+    static int maxWaterLevelLocal = 0;
+    static int minWaterLevelLocal = 1E6;
+
+    // Update rolling averages (Or set if first reading)
+    if (waterLevelAvgLoose == 0)
+        waterLevelAvgLoose = waterLevel;
+    if (waterLevelAvgTight == 0)
+        waterLevelAvgTight = waterLevel;
+    waterLevelAvgTight = applyRollingAverage(waterLevel, waterLevelAvgTight, WATER_LEVEL_AVG_TIGHT);
+    waterLevelAvgLoose = applyRollingAverage(waterLevel, waterLevelAvgLoose, WATER_LEVEL_AVG_LOOSE);
+
+    // Update global extrema
+    if (waterLevelAvgTight < minWaterLevel)
+        minWaterLevel = waterLevelAvgTight;
+    if (waterLevelAvgTight > maxWaterLevel)
+        maxWaterLevel = waterLevelAvgTight;
+
+    // Update local extrema
+    bool is_rising = waterLevelAvgTight > waterLevelAvgLoose;
+    if (is_rising)
+    {
+        // If it's rising, find local max
+        if (waterLevelAvgTight > maxWaterLevelLocal)
+            maxWaterLevelLocal = waterLevelAvgTight;
+    }
+    else
+    {
+        // If it's falling, find local min
+        if (waterLevelAvgTight < minWaterLevelLocal)
+            minWaterLevelLocal = waterLevelAvgTight;
+    }
+
+    if (is_rising && !is_rising_last) // True if trough
+    {
+        // If it's a trough, the norm is calculated from the local min
+        waterLevelNorm = float(minWaterLevelLocal - minWaterLevel) / float(maxWaterLevel - minWaterLevel);
+        
+        // Reset local extrema
+        maxWaterLevelLocal = 0;
+        is_extrema = true;
+    }
+    else if (!is_rising && is_rising_last) // True if peak
+    {
+        // If it's a peak, the norm is calculated from the local max
+        waterLevelNorm = float(maxWaterLevelLocal - minWaterLevel) / float(maxWaterLevel - minWaterLevel);
+        
+        // Reset local extrema
+        minWaterLevelLocal = 1E6;
+        is_extrema = true;
+    }
+    else
+    {
+        // If it's not an extrema, the norm is 0
+        waterLevelNorm = 0.0;
+        is_extrema = false;
+    }
+
+/*
+    Serial.print(waterLevel);
+    Serial.print(" ");
+    Serial.print(waterLevelAvgTight);
+    Serial.print(" ");
+    Serial.print(waterLevelAvgLoose);
+    Serial.print(" ");
+    Serial.print(minWaterLevel);
+    Serial.print(" ");
+    Serial.println(maxWaterLevel);
+    //Serial.print(" ");
+    //Serial.println(waterLevelNorm);
+*/
+
+    is_rising_last = is_rising;
+}
+
+// Apply a rolling average to a value
+int applyRollingAverage(const int new_value, const int current_average, const int rollingAverageSize)
+{
+    return (current_average * (rollingAverageSize - 1) + new_value) / rollingAverageSize;
 }
