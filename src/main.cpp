@@ -7,7 +7,7 @@
 
 #define UDP_LOCAL_PORT 8888
 
-#define UDP_REMOTE_IP 172,20,10,3
+#define UDP_REMOTE_IP 192,168,137,189
 #define UDP_REMOTE_PORT 9999
 
 #define PWM_PIN 13
@@ -25,12 +25,16 @@
 #define NUMBER_SKIPS_AFTER_EXTREMA 10
 #define SIGMOID_FACTOR 2.0
 
+#define LED_RX_PIN 15
+#define LED_TX_PIN 2
+
 WiFiUDP Udp;
 
 // Function declarations
 void connectToWiFi(const char* ssid, const char* pass);
 void beginLocalUdp(unsigned int localPort);
 void startPWM(int pin, int channel, int frequency, int resolution);
+void setupLEDs(int rxPin, int txPin);
 
 void readOSC();
 void sendOSC(const char* topic, float value);
@@ -55,6 +59,9 @@ void setup()
 
     // Start PWM
     startPWM(PWM_PIN, PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
+
+    // Setup LEDs
+    setupLEDs(LED_RX_PIN, LED_TX_PIN);
 
     Serial.println("Setup complete");
 
@@ -109,6 +116,15 @@ void startPWM(int pin, int channel, int frequency, int resolution)
     ledcWrite(channel, 0);
 }
 
+// Setup LEDs
+void setupLEDs(int rxPin, int txPin)
+{
+    pinMode(rxPin, OUTPUT);
+    pinMode(txPin, OUTPUT);
+    digitalWrite(txPin, LOW);
+    digitalWrite(rxPin, LOW);
+}
+
 // Read incoming OSC messages
 void readOSC()
 {
@@ -134,16 +150,24 @@ void readOSC()
 
 void sendOSC(const char* topic, float value)
 {
+    digitalWrite(LED_TX_PIN, HIGH);
+
     OSCMessage msg(topic);
     msg.add(value);
 
     Udp.beginPacket(IPAddress(UDP_REMOTE_IP), UDP_REMOTE_PORT);
     msg.send(Udp);
     Udp.endPacket();
+    msg.empty();
+
+    delay(10);
+    digitalWrite(LED_TX_PIN, LOW);
 }
 
 // Parse motor speed OSC message
 void recieveMotorSpeedOSC(OSCMessage &msg) {
+    digitalWrite(LED_RX_PIN, HIGH);
+
     // Assuming the message contains a float
     float value = msg.getFloat(0);
 
@@ -155,6 +179,10 @@ void recieveMotorSpeedOSC(OSCMessage &msg) {
 
     //Serial.print("Motor speed: ");
     //Serial.println(pwmVal);
+
+    delay(10);
+
+    digitalWrite(LED_RX_PIN, LOW);
 }
 
 void sendWaterLevelNorm()
