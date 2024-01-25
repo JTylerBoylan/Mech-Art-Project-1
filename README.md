@@ -16,8 +16,8 @@ The wave generator is controlled by a simple DC motor with a speed that can be s
 
 ### Electronics
 
-![Electronics](https://github.com/JTylerBoylan/Mech-Art-Project-1/blob/main/images/Electronics.HEIC)
+![Electronics](https://github.com/JTylerBoylan/Mech-Art-Project-1/blob/main/images/Electronics.HEIC?raw=true)
 
 ### Tank
 
-![Tank](https://github.com/JTylerBoylan/Mech-Art-Project-1/blob/main/images/Tank.HEIC)
+![Tank](https://github.com/JTylerBoylan/Mech-Art-Project-1/blob/main/images/Tank.HEIC?raw=true)
