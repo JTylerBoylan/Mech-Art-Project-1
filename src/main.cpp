@@ -20,17 +20,16 @@
 #define MOTOR_SPEED_OSC_TOPIC "/1/faderA"
 #define WATER_LEVEL_OSC_TOPIC "/water_level"
 
-#define WATER_LEVEL_AVG_TIGHT 5
-#define WATER_LEVEL_AVG_LOOSE 10
-
-#define NUMBER_SKIPS_AT_START 5
+#define WATER_LEVEL_SMOOTH_FACTOR 50
+#define EXTREMA_SMOOTH_FACTOR 5
+#define NUMBER_SKIPS_AFTER_EXTREMA 10
+#define SIGMOID_FACTOR 2.0
 
 WiFiUDP Udp;
 
 // Function declarations
 void connectToWiFi(const char* ssid, const char* pass);
 void beginLocalUdp(unsigned int localPort);
-
 void startPWM(int pin, int channel, int frequency, int resolution);
 
 void readOSC();
@@ -38,6 +37,7 @@ void sendOSC(const char* topic, float value);
 
 void recieveMotorSpeedOSC(OSCMessage &msg);
 
+void sendWaterLevelNorm();
 void parseWaterLevel(int waterLevel, bool &is_extrema, float &waterLevelNorm);
 int applyRollingAverage(const int new_value, const int current_average, const int rollingAverageSize);
 
@@ -57,43 +57,21 @@ void setup()
     startPWM(PWM_PIN, PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
 
     Serial.println("Setup complete");
+
+    delay(5000);
 }
 
 // Run the ESP32
 void loop()
 {
-    static int num_skips = 0;
-
     // Read incoming OSC messages
     readOSC();
 
-    // Read current water level
-    int waterLevel = analogRead(WATER_LEVEL_PIN);
-
-    // Parse water level
-    bool is_extrema;
-    float waterLevelNorm;
-    parseWaterLevel(waterLevel, is_extrema, waterLevelNorm);
-
-    // Send water level OSC message
-    if (is_extrema)
-    {
-        // Skip first few readings
-        if (num_skips >= NUMBER_SKIPS_AT_START)
-        {
-            sendOSC(WATER_LEVEL_OSC_TOPIC, waterLevelNorm);
-
-            Serial.print("Water level %: ");
-            Serial.println(waterLevelNorm * 100);
-        }
-        else
-        {
-            num_skips++;
-        }
-    }
+    // Send water level
+    sendWaterLevelNorm();
 
     // Delay 25ms
-    delay(25);
+    delay(10);
 }
 
 // Connect to a WiFi network
@@ -179,91 +157,83 @@ void recieveMotorSpeedOSC(OSCMessage &msg) {
     //Serial.println(pwmVal);
 }
 
+void sendWaterLevelNorm()
+{
+    static int num_skips = 0;
+
+    // Read current water level
+    int waterLevel = analogRead(WATER_LEVEL_PIN);
+
+    // Skip first few readings
+    if (num_skips >= NUMBER_SKIPS_AFTER_EXTREMA)
+    {
+        // Parse water level
+        bool is_extrema;
+        float waterLevelNorm;
+        parseWaterLevel(waterLevel, is_extrema, waterLevelNorm);
+
+        // Send water level OSC message if it is an extrema
+        if (is_extrema)
+        {
+            sendOSC(WATER_LEVEL_OSC_TOPIC, waterLevelNorm);
+            num_skips = 0;
+
+            Serial.println(waterLevelNorm);
+        }
+
+    }        
+    else
+    {
+        num_skips++;
+    }
+}
+
 // Parse water level
 void parseWaterLevel(int waterLevel, bool &is_extrema, float &waterLevelNorm)
 {
-    // Static variables to track rolling averages
-    static int waterLevelAvgTight = 0;
-    static int waterLevelAvgLoose = 0;
-    static bool is_rising_last = false;
+    // Static variables
+    static int waterLevelSmooth = waterLevel;
+    static int waterLevelSmoothPrev = waterLevelSmooth;
+    static bool isRisingPrev = false;
+    
+    static int maxWaterLevel = waterLevel;
+    static int minWaterLevel = waterLevel;
 
-    // Static variables to track extrema
-    static int maxWaterLevel = 0;
-    static int minWaterLevel = 1E6;
+    static int lastExtrema = 0;
 
-    // Static variables to track extrema within a period
-    static int maxWaterLevelLocal = 0;
-    static int minWaterLevelLocal = 1E6;
+    // Apply rolling average
+    waterLevelSmooth = applyRollingAverage(waterLevel, waterLevelSmooth, WATER_LEVEL_SMOOTH_FACTOR);
 
-    // Update rolling averages (Or set if first reading)
-    if (waterLevelAvgLoose == 0)
-        waterLevelAvgLoose = waterLevel;
-    if (waterLevelAvgTight == 0)
-        waterLevelAvgTight = waterLevel;
-    waterLevelAvgTight = applyRollingAverage(waterLevel, waterLevelAvgTight, WATER_LEVEL_AVG_TIGHT);
-    waterLevelAvgLoose = applyRollingAverage(waterLevel, waterLevelAvgLoose, WATER_LEVEL_AVG_LOOSE);
+    // Get change in water level
+    int deltaWaterLevelSmooth = waterLevelSmooth - waterLevelSmoothPrev;
 
-    // Update global extrema
-    if (waterLevelAvgTight < minWaterLevel)
-        minWaterLevel = waterLevelAvgTight;
-    if (waterLevelAvgTight > maxWaterLevel)
-        maxWaterLevel = waterLevelAvgTight;
+    // Check if it is rising or falling
+    bool isRising = deltaWaterLevelSmooth > 0;
 
-    // Update local extrema
-    bool is_rising = waterLevelAvgTight > waterLevelAvgLoose;
-    if (is_rising)
+    // Check if it is an extrema
+    is_extrema = isRisingPrev != isRising;
+
+    // Update max and min water levels
+    if (isRisingPrev && !isRising) // True if at peak
     {
-        // If it's rising, find local max
-        if (waterLevelAvgTight > maxWaterLevelLocal)
-            maxWaterLevelLocal = waterLevelAvgTight;
+        maxWaterLevel = applyRollingAverage(waterLevelSmooth, maxWaterLevel, EXTREMA_SMOOTH_FACTOR);
     }
-    else
+    else if (!isRisingPrev && isRising) // True if at trough
     {
-        // If it's falling, find local min
-        if (waterLevelAvgTight < minWaterLevelLocal)
-            minWaterLevelLocal = waterLevelAvgTight;
+        minWaterLevel = applyRollingAverage(waterLevelSmooth, minWaterLevel, EXTREMA_SMOOTH_FACTOR);
     }
 
-    if (is_rising && !is_rising_last) // True if trough
-    {
-        // If it's a trough, the norm is calculated from the local min
-        waterLevelNorm = float(minWaterLevelLocal - minWaterLevel) / float(maxWaterLevel - minWaterLevel);
-        
-        // Reset local extrema
-        maxWaterLevelLocal = 0;
-        is_extrema = true;
-    }
-    else if (!is_rising && is_rising_last) // True if peak
-    {
-        // If it's a peak, the norm is calculated from the local max
-        waterLevelNorm = float(maxWaterLevelLocal - minWaterLevel) / float(maxWaterLevel - minWaterLevel);
-        
-        // Reset local extrema
-        minWaterLevelLocal = 1E6;
-        is_extrema = true;
-    }
-    else
-    {
-        // If it's not an extrema, the norm is 0
-        waterLevelNorm = 0.0;
-        is_extrema = false;
-    }
+    // Calculate normalized water level
+    waterLevelNorm = float(waterLevelSmooth - minWaterLevel) / float(maxWaterLevel - minWaterLevel);
 
-/*
-    Serial.print(waterLevel);
-    Serial.print(" ");
-    Serial.print(waterLevelAvgTight);
-    Serial.print(" ");
-    Serial.print(waterLevelAvgLoose);
-    Serial.print(" ");
-    Serial.print(minWaterLevel);
-    Serial.print(" ");
-    Serial.println(maxWaterLevel);
-    //Serial.print(" ");
-    //Serial.println(waterLevelNorm);
-*/
+    // Apply sigmoid function
+    waterLevelNorm = 1.0 / (1.0 + exp(-SIGMOID_FACTOR * (waterLevelNorm - 0.5)));
 
-    is_rising_last = is_rising;
+    //Serial.printf("%d %d %d\n", minWaterLevel, maxWaterLevel, waterLevelSmooth);
+
+    // Update static variables
+    waterLevelSmoothPrev = waterLevelSmooth;
+    isRisingPrev = isRising;
 }
 
 // Apply a rolling average to a value
